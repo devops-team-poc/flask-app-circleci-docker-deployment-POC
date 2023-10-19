@@ -1,0 +1,474 @@
+workflows:
+# Used for orchestrating all jobs.
+  version: 2
+  # The Workflows version field is used to issue warnings for deprecation or breaking changes. Required if config version is 2
+  build-deploy:
+    jobs:
+    # A job name that exists in your config.yml
+      - notify
+      - test-deployment
+      - slack/on-hold
+          requires:
+            - test-deployment
+      - pause_workflow:
+          requires:
+            - slack/on-hold
+          type: approval
+            - test-deployment
+      - prod-deployment:
+          requires:
+            - pause_workflow
+
+
+version: 2.1
+# The version field is intended to be used in order to issue warnings for deprecation or breaking changes.
+orbs:
+  slack: circleci/slack@4.12.5
+jobs:
+# A Workflow is comprised of one or more uniquely named jobs.
+  notify:
+    docker:
+      - image: 'cimg/base:stable'
+    steps:
+      - slack/notify:
+          event: always
+          custom: |
+              {
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "New request",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*CircleCI:*\nTriggered"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "block_id": "sectionBlockWithLinkButton",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "Click to go to the pipeline."
+                    },
+                    "accessory": {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "Pipeline",
+                        "emoji": true
+                      },
+                      "value": "click_me_123",
+                      "url": "${SLACK_PARAM_CIRCLECI_HOST}/workflow-run/${CIRCLE_WORKFLOW_ID}",
+                      "action_id": "button-action"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "Click to check commit details."
+                    },
+                    "accessory": {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "Git Commit",
+                        "emoji": true
+                      },
+                      "value": "click_me_123",
+                      "url": "https://github.com/GauravBarakoti/circleci-poc/commit/${CIRCLE_SHA1}",
+                      "action_id": "button-action"
+                    }
+                  }
+                ]
+              }
+
+  test-deployment:
+  # Name for a job, can be anything
+    machine: true
+    # The virtual machine image to use. 
+    resource_class: k8vhsqovhlv8kmbfzecxgd/docker
+    # The resource_class feature allows you to configure CPU and RAM resources for each job.
+    working_directory: ~/test_server
+    # Not Required, In which directory to run the steps. Will be interpreted as an absolute path. (default: .)
+    steps:
+    # A list of steps to be performed.
+      - checkout
+      # the checkout step will checkout project source code into the job’s working_directory
+      - run: 
+          name: Build Docker Image
+          command: docker build -t mysampleimage:${CIRCLE_BUILD_NUM} .
+          # fix this with image tag and keep 2 previous version of the image
+      - run: sudo systemctl reload apache2
+      - run:
+          name: Stop and Remove Container first and launch new container
+          command: |
+            if [[ "$(docker ps --filter name=first -aq)" != "" ]]; then
+              docker container stop $(docker ps --filter name=first -aq)
+              docker container rm $(docker ps --filter name=first -aq)
+              docker container run --name first -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+              sleep 2
+            else
+              docker container run --name first -d -p 8081:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+            fi
+      - run: sudo systemctl reload apache2
+      - run:
+          name: Waiting to stable the app
+          command: sleep 8
+      - run:
+          name: Stop and Remove Container Second and launch new container
+          command: |
+            if [[ "$(docker ps --filter name=second -aq)" != "" ]]; then
+              docker container stop $(docker ps --filter name=second -aq)
+              docker container rm $(docker ps --filter name=second -aq)
+              docker container run --name second -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+              sleep 2
+            else
+              docker container run --name second -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+            fi
+      - run: sudo systemctl reload apache2
+      - run:
+      # Used for invoking all command-line programs
+          name: Remove previous Image If Any keep last 2 version
+          # Command to run via the shell
+          command: |
+            if [[ "$(docker images mysampleimage:`expr ${CIRCLE_BUILD_NUM} - 3 ` -q)" != "" ]]; then
+              docker image rm $(docker images mysampleimage:`expr ${CIRCLE_BUILD_NUM} - 3 ` -q)
+            fi
+      - run:
+      # we can also use shell script here
+          name: file upload to slack
+          command: |
+            curl localhost  2>&1 | tee index.html
+            curl -F file=@index.html -F "initial_comment=test for upload" -F channels=${CHANNEL_ID} -H "Authorization: Bearer ${TOKEN}" https://slack.com/api/files.upload
+      - slack/notify:
+          event: pass
+          mentions: "@gauravbarakoti"
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Job Succeeded. :white_check_mark:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Job*: ${CIRCLE_JOB}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch*: $CIRCLE_BRANCH"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit*: $CIRCLE_SHA1"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author*: $CIRCLE_USERNAME"
+                    }
+                  ],
+                  "accessory": {
+                    "type": "image",
+                    "image_url": "https://assets.brandfolder.com/otz5mn-bw4j2w-6jzqo8/original/circle-logo-badge-black.png",
+                    "alt_text": "CircleCI logo"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Mentions*: $SLACK_PARAM_MENTIONS"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "action_id": "basic_success_view",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Job"
+                      },
+                      "url": "${SLACK_PARAM_CIRCLECI_HOST}/workflow-run/${CIRCLE_WORKFLOW_ID}"
+                    }
+                  ]
+                }
+              ]
+            }
+      - slack/notify:
+          event: fail
+          mentions: "@gauravbarakoti"
+          custom: |
+              {
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "Job Failed. :red_circle:",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Job*: ${CIRCLE_JOB}"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Branch*: ${CIRCLE_BRANCH}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Author*: ${CIRCLE_USERNAME}"
+                      }
+                    ],
+                    "accessory": {
+                      "type": "image",
+                      "image_url": "https://assets.brandfolder.com/otz5mn-bw4j2w-6jzqo8/original/circle-logo-badge-black.png",
+                      "alt_text": "CircleCI logo"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Mentions*: $SLACK_PARAM_MENTIONS"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "action_id": "basic_fail_view",
+                        "text": {
+                          "type": "plain_text",
+                          "text": "View Job"
+                        },
+                        "url": "${SLACK_PARAM_CIRCLECI_HOST}/workflow-run/${CIRCLE_WORKFLOW_ID}"
+                      }
+                    ]
+                  }
+                ]
+              }
+
+  prod-deployment:
+    machine: true
+    resource_class: k8vhsqovhlv8kmbfzecxgd/redhat
+    working_directory: ~/my-app
+    steps:
+      - checkout
+      # the checkout step will checkout project source code into the job’s working_directory
+      - run: 
+          name: Build Docker Image
+          command: docker build -t mysampleimage:${CIRCLE_BUILD_NUM} .
+          # fix this with image tag and keep 2 previous version of the image
+      - run: sudo systemctl reload httpd
+      - run:
+          name: Stop and Remove Container first and launch new coantianer
+          command: |
+            if [[ "$(docker ps --filter name=first -aq)" != "" ]]; then
+              docker container stop $(docker ps --filter name=first -aq)
+              docker container rm $(docker ps --filter name=first -aq)
+              docker container run --name first -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+              sleep 2
+            else
+              docker container run --name first -d -p 8081:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+            fi
+
+      - run: sudo systemctl reload httpd
+      - run:
+          name: Waiting to stable the app
+          command: sleep 8
+      - run:
+          name: Stop and Remove Container Second and launch new container
+          command: |
+            if [[ "$(docker ps --filter name=second -aq)" != "" ]]; then
+              docker container stop $(docker ps --filter name=second -aq)
+              docker container rm $(docker ps --filter name=second -aq)
+              docker container run --name second -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+              sleep 2
+            else
+              docker container run --name second -d -p 8082:5000 mysampleimage:${CIRCLE_BUILD_NUM}
+            fi
+      - run: sudo systemctl reload httpd
+      - run:
+      # Used for invoking all command-line programs
+          name: Remove previous Image If Any keep last 2 version
+          # Command to run via the shell
+          command: |
+            if [[ "$(docker images mysampleimage:`expr ${CIRCLE_BUILD_NUM} - 3 ` -q)" != "" ]]; then
+              docker image rm $(docker images mysampleimage:`expr ${CIRCLE_BUILD_NUM} - 3 ` -q)
+            fi
+      - slack/notify:
+          event: pass
+          mentions: "@gauravbarakoti"
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Job Succeeded. :white_check_mark:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Job*: ${CIRCLE_JOB}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch*: $CIRCLE_BRANCH"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit*: $CIRCLE_SHA1"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author*: $CIRCLE_USERNAME"
+                    }
+                  ],
+                  "accessory": {
+                    "type": "image",
+                    "image_url": "https://assets.brandfolder.com/otz5mn-bw4j2w-6jzqo8/original/circle-logo-badge-black.png",
+                    "alt_text": "CircleCI logo"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Mentions*: $SLACK_PARAM_MENTIONS"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "action_id": "basic_success_view",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Job"
+                      },
+                      "url": "${SLACK_PARAM_CIRCLECI_HOST}/workflow-run/${CIRCLE_WORKFLOW_ID}"
+                    }
+                  ]
+                }
+              ]
+            }
+      - slack/notify:
+          event: fail
+          mentions: "@gauravbarakoti"
+          custom: |
+              {
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "Job Failed. :red_circle:",
+                      "emoji": true
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Job*: ${CIRCLE_JOB}"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Branch*: ${CIRCLE_BRANCH}"
+                      },
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Author*: ${CIRCLE_USERNAME}"
+                      }
+                    ],
+                    "accessory": {
+                      "type": "image",
+                      "image_url": "https://assets.brandfolder.com/otz5mn-bw4j2w-6jzqo8/original/circle-logo-badge-black.png",
+                      "alt_text": "CircleCI logo"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {
+                        "type": "mrkdwn",
+                        "text": "*Mentions*: $SLACK_PARAM_MENTIONS"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "action_id": "basic_fail_view",
+                        "text": {
+                          "type": "plain_text",
+                          "text": "View Job"
+                        },
+                        "url": "${SLACK_PARAM_CIRCLECI_HOST}/workflow-run/${CIRCLE_WORKFLOW_ID}"
+                      }
+                    ]
+                  }
+                ]
+              }
+
